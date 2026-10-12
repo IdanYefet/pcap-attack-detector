@@ -16,8 +16,9 @@ A single host on the lab network (`10.0.2.4`) performed a full TCP port scan of
 the target server (`10.0.2.3`), discovered an exposed SSH service on `tcp/22`,
 and then launched an SSH brute-force attack against the `labuser` account. The
 attack succeeded because the account used a weak password. Both stages were
-captured passively and detected by `pcap-attack-detector`, and mapped to MITRE
-ATT&CK techniques **T1046** and **T1110**.
+captured passively and detected by `pcap-attack-detector`, confirmed by manual
+analysis in Wireshark, and mapped to MITRE ATT&CK techniques **T1046** and
+**T1110**.
 
 ## 2. Lab topology
 
@@ -42,6 +43,7 @@ ATT&CK techniques **T1046** and **T1110**.
 | Attacker | `hydra` | SSH password brute force |
 | Target | `tcpdump` | Passive packet capture to `attack.pcap` |
 | Analyst | `pcap-attack-detector` | Offline detection + MITRE mapping |
+| Analyst | Wireshark | Manual packet inspection |
 
 ## 4. Timeline of events
 
@@ -52,9 +54,7 @@ ATT&CK techniques **T1046** and **T1110**.
 | Credential access | `10.0.2.4 → 10.0.2.3:22` | repeated SSH connections, 20 password guesses | T1110 |
 | Compromise | `10.0.2.4 → 10.0.2.3:22` | `labuser:password123` accepted | T1110 |
 
-## 5. Findings
-
-Output of `pcap-attack-detector` on the captured traffic:
+## 5. Automated findings (pcap-attack-detector)
 
 ```
   pcap-attack-detector  —  /home/idan/attack.pcap
@@ -83,7 +83,32 @@ Output of `pcap-attack-detector` on the captured traffic:
   brute force. The weak password (`password123`) made the account trivial to
   compromise.
 
-## 6. Detection limitation discovered (and fixed)
+## 6. Manual packet analysis (Wireshark)
+
+The same capture was inspected by hand in Wireshark to confirm the automated
+findings and extract additional indicators.
+
+**Port scan** — display filter `tcp.flags.syn==1 && tcp.flags.ack==0` shows one
+source (`10.0.2.4`) sending SYN probes to hundreds of distinct service ports on
+`10.0.2.3` within milliseconds — the hallmark of an automated scan (nmap probes
+the ~1,000 most common ports in randomised order, not a 1-2-3 sweep).
+
+**SSH brute force** — display filter `tcp.port == 22`:
+
+![SSH brute force in Wireshark](docs/wireshark-ssh-bruteforce.png)
+
+- The scan's probe to `22` is answered with `SYN, ACK`, confirming the SSH
+  service is **open** (this is how the attacker found it), then reset with `RST`.
+- The brute force appears as several short-lived TCP connections to `22`, each
+  completing an SSH handshake, exchanging encrypted auth packets (the password
+  guess), then closing with `FIN` — followed by a new connection for the next
+  guess. These are the 6 connections the detector counted.
+- **Indicator of Compromise (IOC):** the client protocol banner is
+  `SSH-2.0-libssh_0.12.0`, **not** `OpenSSH`. Interactive users connect with
+  OpenSSH; `libssh` is the library used by automated tools such as `hydra` — a
+  strong signal that the SSH traffic is a tool, not a human.
+
+## 7. Detection limitation discovered (and fixed)
 
 While validating the detector against this real capture, the brute force was
 **not** flagged at first. Root cause:
@@ -100,9 +125,9 @@ brute-force attack. This is a genuine SOC lesson: a detector that keys purely on
 rapid SSH connections from one source already imply many auth attempts). After
 the fix the attack is detected at the default settings. A production-grade
 detector would additionally correlate with authentication-failure logs (the
-approach `fail2ban` and host IDS use).
+approach `fail2ban` and host IDS use) and flag the `libssh` client banner.
 
-## 7. MITRE ATT&CK mapping
+## 8. MITRE ATT&CK mapping
 
 | Technique | ID | Tactic |
 | --- | --- | --- |
@@ -110,7 +135,7 @@ approach `fail2ban` and host IDS use).
 | Active Scanning | [T1595](https://attack.mitre.org/techniques/T1595/) | Reconnaissance |
 | Brute Force | [T1110](https://attack.mitre.org/techniques/T1110/) | Credential Access |
 
-## 8. Recommendations
+## 9. Recommendations
 
 - **Disable SSH password authentication**; use key-based auth only.
 - **Deploy `fail2ban`** or SSH connection rate-limiting to block repeated
@@ -119,12 +144,15 @@ approach `fail2ban` and host IDS use).
   compromise.
 - **Network segmentation and firewall default-deny** to limit port-scan
   reconnaissance.
-- **Alert on N+ distinct ports from one source** in a short window (IDS rule).
+- **Alert on N+ distinct ports from one source** in a short window, and on
+  non-OpenSSH client banners (e.g. `libssh`) against SSH.
 
-## 9. Lessons learned
+## 10. Lessons learned
 
 - Built a passive detector, then **validated it against real captured traffic**,
   which exposed a blind spot (SSH connection reuse) that synthetic tests had not.
 - Iterated on the detector based on that evidence and re-verified the fix.
+- Used Wireshark to confirm findings by hand and extract an IOC (the `libssh`
+  client banner) the automated tool did not surface.
 - Reinforced the core SOC loop: **capture → detect → analyse → map → recommend**,
   and the value of testing detections against realistic adversary behaviour.
