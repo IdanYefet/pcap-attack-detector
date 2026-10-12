@@ -37,7 +37,7 @@ class Thresholds:
     scan_distinct_ports: int = 15
     # A source that opens at least this many connections to port 22 on one
     # host is treated as an SSH brute-force attempt.
-    ssh_min_attempts: int = 10
+    ssh_min_attempts: int = 5
     # TCP port considered "SSH".
     ssh_port: int = 22
 
